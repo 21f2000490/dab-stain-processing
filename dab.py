@@ -128,6 +128,38 @@ def write_img(path, img, grayscale=False, invert=False):
     cv2.imwrite(path, img)
 
 
+def remove_bubbles(img):
+    out = img.copy()
+
+    img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    img_gray = cv2.GaussianBlur(img_gray, (9, 9), 0)
+
+    sobelx = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+    mag = cv2.magnitude(sobelx, sobely)
+    edges = (mag > np.percentile(mag, 90)).astype(np.uint8) * 255
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    for i, c in enumerate(contours):
+        if len(c) < 50:
+            continue
+
+        pts = c.reshape(-1, 2)
+        pts = pts.astype(np.float32)
+
+        center = pts.mean(axis=0)
+        r = np.linalg.norm(pts - center, axis=1)
+
+        if r.mean() < 20:
+            continue
+        if r.std() / r.mean() > 0.15:
+            continue
+
+        cv2.drawContours(out, [cv2.convexHull(c)], -1, (1, 1, 1), thickness=-1)
+
+    return out
+
+
 def process(config: Config):
     config.out_dir.mkdir(parents=True, exist_ok=True)
     components_dir = config.out_dir / "components"
@@ -141,6 +173,8 @@ def process(config: Config):
 
     img = read_image_rgb(config.input_file)
     h, w, _ = img.shape
+
+    img = remove_bubbles(img)
 
     # color deconv matrix for HEMA (first column) /DAB (second column) stains
     K = np.array([[0.650, 0.704, 0.286], [0.268, 0.570, 0.776]]).T  # 3x2
@@ -160,7 +194,8 @@ def process(config: Config):
     component_masks = connected_components(mask)
 
     if config.apply_area_filters:
-        for cm in component_masks:
+        for i in range(len(component_masks)):
+            cm = component_masks[i]
             area = cm.sum()
             ys, xs = np.nonzero(cm)
             ecc = get_eccentricity(ys, xs)
@@ -169,7 +204,8 @@ def process(config: Config):
                 mask[cm] = 0
             if area < config.soft_area_threshold and ecc < config.eccentricity_threshold:
                 mask[cm] = 0
-        component_masks = [cm & mask for cm in component_masks]
+            component_masks[i] &= mask.astype(np.bool)
+
         component_masks = [cm for cm in component_masks if cm.sum() > 0]
 
         if config.debug:
