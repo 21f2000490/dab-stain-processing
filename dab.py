@@ -126,36 +126,78 @@ def write_img(path, img, grayscale=False, invert=False):
     cv2.imwrite(path, img)
 
 
-def remove_bubbles(img):
-    out = img.copy()
+def remove_bubbles(
+    img,
+    lower_brown=np.array([0, 15, 40]),
+    upper_brown=np.array([35, 255, 255]),
+    min_area=50,
+    max_area=2500,
+    circle_thresh=0.2,
+    angle_thresh=1.7 * np.pi,
+    edge_margin=5,
+):
+    h, w, _ = img.shape
+    output = img.copy()
 
-    img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    img_gray = cv2.GaussianBlur(img_gray, (9, 9), 0)
+    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    mask = cv2.inRange(hsv, lower_brown, upper_brown)
 
-    sobelx = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
-    sobely = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
-    mag = cv2.magnitude(sobelx, sobely)
-    edges = (mag > np.percentile(mag, 90)).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    for i, c in enumerate(contours):
-        if len(c) < 50:
-            continue
+    def is_circle(contour):
+        if contour is None:
+            return False, False
 
-        pts = c.reshape(-1, 2)
+        pts = contour.reshape(-1, 2)
+        if pts.shape[0] < 5:
+            return False, False
+
         pts = pts.astype(np.float32)
+        x = pts[:, 0]
+        y = pts[:, 1]
 
-        center = pts.mean(axis=0)
+        A = np.column_stack([x, y, np.ones_like(x)])
+        b = -(x**2 + y**2)
+
+        try:
+            D, E, F = np.linalg.lstsq(A, b, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            return False, False
+
+        cx, cy = -D / 2, -E / 2
+        center = np.array([cx, cy])
+
         r = np.linalg.norm(pts - center, axis=1)
+        mean_r = r.mean()
+        if mean_r == 0:
+            return False, False
 
-        if r.mean() < 20:
+        is_partial_circle = r.std() / mean_r < circle_thresh
+
+        angles = np.arctan2(y - cy, x - cx)
+        angles = np.unwrap(angles)
+        is_full_circle = (angles.max() - angles.min()) > angle_thresh
+        is_full_circle = is_full_circle and is_partial_circle
+
+        return is_partial_circle, is_full_circle
+
+    def is_close_to_image_edge(contour):
+        x, y, bw, bh = cv2.boundingRect(contour)
+        return x <= edge_margin or y <= edge_margin or x + bw >= w - edge_margin or y + bh >= h - edge_margin
+
+    for c in contours:
+        area = cv2.contourArea(c)
+
+        if min_area < area < max_area:
             continue
-        if r.std() / r.mean() > 0.15:
-            continue
 
-        cv2.drawContours(out, [cv2.convexHull(c)], -1, (1, 1, 1), thickness=-1)
+        is_partial_circle, is_full_circle = is_circle(c)
 
-    return out
+        is_bubble = is_full_circle or (is_partial_circle and is_close_to_image_edge(c))
+        if is_bubble:
+            cv2.drawContours(output, [c], -1, (255, 255, 255), thickness=cv2.FILLED)
+
+    return output
 
 
 def process(config: Config):
