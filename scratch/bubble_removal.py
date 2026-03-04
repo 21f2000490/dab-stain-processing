@@ -11,8 +11,6 @@ OUTPUT = sys.argv[2] if len(sys.argv) > 2 else "img_bubbles_area.png"
 # HSV thresholds - copied from project files (tweak if needed)
 LOWER_BROWN = np.array([0, 15, 40])
 UPPER_BROWN = np.array([35, 255, 255])
-MIN_AREA = 50
-MAX_AREA = 2500
 
 img = cv2.imread(INPUT, cv2.IMREAD_COLOR)
 if img is None:
@@ -75,10 +73,6 @@ def is_close_to_image_edge(contour, h, w, margin=5):
 # We'll draw black boundaries around contours that are considered 'bubbles/artifacts' -> i.e., outside area range
 output = img.copy()
 for c in contours:
-    area = cv2.contourArea(c)
-    if MIN_AREA < area < MAX_AREA:
-        continue
-
     is_partial_circle, is_full_circle = is_circle(c, thresh=0.2)
     is_bubble = is_full_circle or (is_partial_circle and is_close_to_image_edge(c, h, w, margin=5))
     if is_bubble:

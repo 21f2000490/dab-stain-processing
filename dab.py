@@ -130,8 +130,6 @@ def remove_bubbles(
     img,
     lower_brown=np.array([0, 15, 40]),
     upper_brown=np.array([35, 255, 255]),
-    min_area=50,
-    max_area=2500,
     circle_thresh=0.2,
     angle_thresh=1.7 * np.pi,
     edge_margin=5,
@@ -186,11 +184,6 @@ def remove_bubbles(
         return x <= edge_margin or y <= edge_margin or x + bw >= w - edge_margin or y + bh >= h - edge_margin
 
     for c in contours:
-        area = cv2.contourArea(c)
-
-        if min_area < area < max_area:
-            continue
-
         is_partial_circle, is_full_circle = is_circle(c)
 
         is_bubble = is_full_circle or (is_partial_circle and is_close_to_image_edge(c))
