@@ -9,29 +9,21 @@ from numpy.lib.stride_tricks import as_strided
 from autoparse import parse_args
 
 
+class Parameters:
+    eccentricity_threshold = 0.9
+    hard_area_threshold = 50
+    soft_area_threshold = 100
+    bubble_circle_threshold = 0.2
+
+
 @dataclass(eq=True, frozen=True)
 class Config:
     input_file: Path = field(metadata={"help": "Path to the input image file."})
-    out_dir: Path = field(metadata={"help": "Path to save the centroids and output files."})
+    out_dir: Path = field(metadata={"help": "Path to save the output files."})
     debug: bool = field(default=False, metadata={"help": "Enable debug mode to print intermediate information."})
-    apply_box_filters: bool = field(default=True, metadata={"help": "Apply box filters."})
-    apply_area_filters: bool = field(default=True, metadata={"help": "Apply area filters based on given thresholds."})
 
     dab_strength_threshold: float = field(
         default=0.8, metadata={"help": "Threshold for DAB stain strength used in detection or filtering."}
-    )
-    hard_area_threshold: float = field(
-        default=50.0, metadata={"help": "Hard area threshold below which components are discarded."}
-    )
-    soft_area_threshold: float = field(
-        default=100.0,
-        metadata={"help": "Soft area threshold for weighting or filtering components. Requires --apply-area-filters"},
-    )
-    eccentricity_threshold: float = field(
-        default=0.9,
-        metadata={
-            "help": "Eccentricity threshold used to filter non-circular components. Requires --apply-area-filters"
-        },
     )
 
     # validation
@@ -46,14 +38,8 @@ class Config:
         object.__setattr__(self, "out_dir", self.out_dir / subdir_name)
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.hard_area_threshold < 0 or self.soft_area_threshold < 0:
-            raise ValueError("Area thresholds must be non-negative.")
-
         if not (0 <= self.dab_strength_threshold <= 1):
             raise ValueError(f"--dab-strength-threshold: expected between 0 and 1, got {self.dab_strength_threshold}")
-
-        if not (0 <= self.eccentricity_threshold <= 1):
-            raise ValueError(f"--eccentricity-threshold: expected between 0 and 1, got {self.eccentricity_threshold}")
 
 
 def read_image_rgb(path, normalize=False):
@@ -128,9 +114,9 @@ def write_img(path, img, grayscale=False, invert=False):
 
 def remove_bubbles(
     img,
+    circle_thresh,
     lower_brown=np.array([0, 15, 40]),
     upper_brown=np.array([35, 255, 255]),
-    circle_thresh=0.2,
     angle_thresh=1.7 * np.pi,
     edge_margin=5,
 ):
@@ -197,20 +183,18 @@ def process(config: Config):
     config.out_dir.mkdir(parents=True, exist_ok=True)
     components_dir = config.out_dir / "components"
     annotation_dir = config.out_dir / "annotated"
-    centroids_dir = config.out_dir / "centroids"
     debug_dir = config.out_dir / "debug"
     components_dir.mkdir(exist_ok=True)
     annotation_dir.mkdir(exist_ok=True)
-    centroids_dir.mkdir(exist_ok=True)
     debug_dir.mkdir(exist_ok=True)
 
     img = read_image_rgb(config.input_file)
     h, w, _ = img.shape
 
-    img = remove_bubbles(img)
+    img = remove_bubbles(img, circle_thresh=Parameters.bubble_circle_threshold)
 
     if config.debug:
-        write_img(debug_dir / ("bubbles_removed_" + config.input_file.stem + ".png"), img)
+        write_img(debug_dir / ("bubbles-removed_" + config.input_file.stem + ".png"), img)
 
     # color deconv matrix for HEMA (first column) /DAB (second column) stains
     K = np.array([[0.650, 0.704, 0.286], [0.268, 0.570, 0.776]]).T  # 3x2
@@ -218,81 +202,54 @@ def process(config: Config):
     dab_strength = strengths[1]
     mask = (dab_strength > config.dab_strength_threshold).astype(np.uint8).reshape(h, w)
 
-    if config.apply_box_filters:
-        mask = apply_filter(mask, 3, np.min)  # remove white specks in black blobs
-        mask = apply_filter(mask, 3, np.max)  # restore white edges that got serrated
-        mask = apply_filter(mask, 3, np.max)  # remove black specks inside white blobs
-        mask = apply_filter(mask, 3, np.min)  # restore black edges that got serrated
+    if config.debug:
+        write_img(debug_dir / ("mask-dab-thresholded_" + config.input_file.stem + ".png"), mask, grayscale=True)
 
-        if config.debug:
-            write_img(debug_dir / ("mask-box-filtered_" + config.input_file.stem + ".png"), mask, grayscale=True)
+    mask = apply_filter(mask, 3, np.min)  # remove white specks in black blobs
+    mask = apply_filter(mask, 3, np.max)  # restore white edges that got serrated
+    mask = apply_filter(mask, 3, np.max)  # remove black specks inside white blobs
+    mask = apply_filter(mask, 3, np.min)  # restore black edges that got serrated
+
+    if config.debug:
+        write_img(debug_dir / ("mask-box-filtered_" + config.input_file.stem + ".png"), mask, grayscale=True)
 
     component_masks = connected_components(mask)
+    if config.debug:
+        with open(debug_dir / ("components-pre-area-filter_" + config.input_file.stem + ".txt"), "w") as f:
+            f.write("x y area\n")
+            for cm in component_masks:
+                ys, xs = np.nonzero(cm)
+                area = len(ys)
+                if area > 0:
+                    cy = ys.mean()
+                    cx = xs.mean()
+                    f.write(f"{cx} {cy} {area}\n")
 
-    if config.apply_area_filters:
-        for i in range(len(component_masks)):
-            cm = component_masks[i]
-            area = cm.sum()
-            ys, xs = np.nonzero(cm)
-            ecc = get_eccentricity(ys, xs)
-
-            if area < config.hard_area_threshold:
-                mask[cm] = 0
-            if area < config.soft_area_threshold and ecc < config.eccentricity_threshold:
-                mask[cm] = 0
-            component_masks[i] &= mask.astype(bool)
-
-        component_masks = [cm for cm in component_masks if cm.sum() > 0]
-
-        if config.debug:
-            write_img(debug_dir / ("mask-area-filtered_" + config.input_file.stem + ".png"), mask, grayscale=True)
-
-    centroids_file = open(centroids_dir / Path(config.input_file.stem + ".txt"), "w")
-    centroid_mask = np.zeros((h, w), dtype=np.uint8)
-    for cm in component_masks:
+    for i in range(len(component_masks)):
+        cm = component_masks[i]
         area = cm.sum()
         ys, xs = np.nonzero(cm)
-        cy, cx = np.int32(ys.mean()), np.int32(xs.mean())
-        centroid_mask[cy, cx] = 1
+        ecc = get_eccentricity(ys, xs)
 
-        y1 = max(cy - 2, 0)
-        x1 = max(cx - 2, 0)
-        y2 = min(cy + 2, h - 1)
-        x2 = min(cx + 2, w - 1)
+        if area < Parameters.hard_area_threshold:
+            mask[cm] = 0
+        if area < Parameters.soft_area_threshold and ecc < Parameters.eccentricity_threshold:
+            mask[cm] = 0
+        component_masks[i] &= mask.astype(bool)
 
-        centroid_mask[cy, x1 : x2 + 1] = 1
-        centroid_mask[y1 : y2 + 1, cx] = 1
-
-        centroids_file.write(f"{cx},{cy} {area}\n")
-    centroids_file.close()
+    component_masks = [cm for cm in component_masks if cm.sum() > 0]
 
     if config.debug:
-        write_img(debug_dir / ("centroids_mask_" + config.input_file.stem + ".png"), centroid_mask, grayscale=True)
-
-    bbox_mask = np.zeros((h, w), dtype=np.uint8)
-    for cm in component_masks:
-        ys, xs = np.nonzero(cm)
-        ymin, ymax = np.min(ys), np.max(ys)
-        xmin, xmax = np.min(xs), np.max(xs)
-        y1 = max(ymin - 2, 0)
-        x1 = max(xmin - 2, 0)
-        y2 = min(ymax + 2, h - 1)
-        x2 = min(xmax + 2, w - 1)
-
-        bbox_mask[y1 : y1 + 2, x1 : x2 + 1] = 1  # top
-        bbox_mask[y1 : y2 + 1, x2 : x2 + 2] = 1  # right
-        bbox_mask[y2 : y2 + 2, x1 : x2 + 1] = 1  # bottom
-        bbox_mask[y1 : y2 + 1, x1 : x1 + 2] = 1  # left
-
-    if config.debug:
-        write_img(debug_dir / ("bbox_mask_" + config.input_file.stem + ".png"), bbox_mask, grayscale=True)
+        write_img(debug_dir / ("mask-area-filtered_" + config.input_file.stem + ".png"), mask, grayscale=True)
 
     components_of_img = img.copy()
     components_of_img[mask == 0] = (255, 255, 255)
 
     annotated_img = img.copy()
-    annotated_img[bbox_mask == 1] = (0, 0, 0)
-    annotated_img[centroid_mask == 1] = (255, 0, 0)
+    for cm in component_masks:
+        cm_uint8 = cm.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(cm_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        cv2.drawContours(annotated_img, contours, -1, (0, 0, 0), thickness=1)
 
     write_img(components_dir / Path(config.input_file.stem + ".png"), components_of_img)
     write_img(annotation_dir / Path(config.input_file.stem + ".png"), annotated_img)
