@@ -15,7 +15,7 @@ class Config:
     out_dir: Path = field(metadata={"help": "Path to save the centroids and output files."})
     debug: bool = field(default=False, metadata={"help": "Enable debug mode to print intermediate information."})
     apply_box_filters: bool = field(default=True, metadata={"help": "Apply box filters."})
-    apply_area_filters: bool = field(default=False, metadata={"help": "Apply area filters based on given thresholds."})
+    apply_area_filters: bool = field(default=True, metadata={"help": "Apply area filters based on given thresholds."})
 
     dab_strength_threshold: float = field(
         default=0.8, metadata={"help": "Threshold for DAB stain strength used in detection or filtering."}
@@ -56,12 +56,10 @@ class Config:
             raise ValueError(f"--eccentricity-threshold: expected between 0 and 1, got {self.eccentricity_threshold}")
 
 
-def read_image_rgb(path, normalize=True):
+def read_image_rgb(path, normalize=False):
     img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32)
     if normalize:
-        img /= 255.0
-
+        img = img.astype(np.float32) / 255.0
     return img
 
 
@@ -119,8 +117,8 @@ def get_eccentricity(ys, xs):
 
 
 def write_img(path, img, grayscale=False, invert=False):
-    img = 255 * img
-    img = img.astype(np.uint8)
+    if img.dtype != np.uint8:
+        img = (255 * img).astype(np.uint8)
     if not grayscale:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     elif invert:
@@ -176,9 +174,12 @@ def process(config: Config):
 
     img = remove_bubbles(img)
 
+    if config.debug:
+        write_img(debug_dir / ("bubbles_removed_" + config.input_file.stem + ".png"), img)
+
     # color deconv matrix for HEMA (first column) /DAB (second column) stains
     K = np.array([[0.650, 0.704, 0.286], [0.268, 0.570, 0.776]]).T  # 3x2
-    strengths = calculate_stain_strengths(img, K)
+    strengths = calculate_stain_strengths(img.astype(np.float32) / 255.0, K)
     dab_strength = strengths[1]
     mask = (dab_strength > config.dab_strength_threshold).astype(np.uint8).reshape(h, w)
 
@@ -204,7 +205,7 @@ def process(config: Config):
                 mask[cm] = 0
             if area < config.soft_area_threshold and ecc < config.eccentricity_threshold:
                 mask[cm] = 0
-            component_masks[i] &= mask.astype(np.bool)
+            component_masks[i] &= mask.astype(bool)
 
         component_masks = [cm for cm in component_masks if cm.sum() > 0]
 
@@ -252,11 +253,11 @@ def process(config: Config):
         write_img(debug_dir / ("bbox_mask_" + config.input_file.stem + ".png"), bbox_mask, grayscale=True)
 
     components_of_img = img.copy()
-    components_of_img[mask == 0] = (1, 1, 1)
+    components_of_img[mask == 0] = (255, 255, 255)
 
     annotated_img = img.copy()
     annotated_img[bbox_mask == 1] = (0, 0, 0)
-    annotated_img[centroid_mask == 1] = (1, 0, 0)
+    annotated_img[centroid_mask == 1] = (255, 0, 0)
 
     write_img(components_dir / Path(config.input_file.stem + ".png"), components_of_img)
     write_img(annotation_dir / Path(config.input_file.stem + ".png"), annotated_img)

@@ -25,9 +25,7 @@ hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 mask = cv2.inRange(hsv, LOWER_BROWN, UPPER_BROWN)
 
 # find contours (OpenCV version-agnostic)
-conts_info = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-contours = conts_info[0] if len(conts_info) == 2 else conts_info[1]
-
+contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
 def is_circle(contour, thresh=0.15, angle_thresh=1.7 * np.pi):
     if contour is None:
